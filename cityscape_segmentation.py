@@ -5,7 +5,6 @@ from keras.layers import RandomFlip, Input, Conv2DTranspose, Concatenate, Layer
 from keras.utils import plot_model
 from IPython.display import clear_output
 from tensorflow_examples.models.pix2pix import pix2pix
-from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import numpy as np
 import cv2, os, glob, datetime
@@ -101,7 +100,6 @@ labels = [
 
 
 # %% 1. Data loading
-#  Load images in, crop for the image and mask, resize, and then encode mask
 DATASET_PATH = os.path.join(os.getcwd(), 'dataset')
 
 train_path = glob.glob(os.path.join(DATASET_PATH, 'train', '*.jpg'))
@@ -115,7 +113,7 @@ def find_closest_labels_vectorized(mask, mapping):
     closest_distance = np.full([mask.shape[0], mask.shape[1]], 10000) 
     closest_category = np.full([mask.shape[0], mask.shape[1]], None)   
 
-    for id, color in mapping.items(): # iterate over every color mapping
+    for id, color in mapping.items():
         dist = np.sqrt(np.linalg.norm(mask - color.reshape([1,1,-1]), axis=-1))
         is_closer = closest_distance > dist
         closest_distance = np.where(is_closer, dist, closest_distance)
@@ -127,8 +125,15 @@ train_features = [cv2.resize(cv2.cvtColor(cv2.imread(image)[:, :256], cv2.COLOR_
 train_targets = [cv2.resize(cv2.cvtColor(cv2.imread(mask)[:, 256:], cv2.COLOR_BGR2RGB), IMAGE_SIZE) for mask in train_path]
 train_targets_enc = [find_closest_labels_vectorized(mask, ID2COLOR) for mask in train_targets]
 
+val_features = [cv2.resize(cv2.cvtColor(cv2.imread(image)[:, :256], cv2.COLOR_BGR2RGB), IMAGE_SIZE) for image in val_path]
+val_targets = [cv2.resize(cv2.cvtColor(cv2.imread(mask)[:, 256:], cv2.COLOR_BGR2RGB), IMAGE_SIZE) for mask in val_path]
+val_targets_enc = [find_closest_labels_vectorized(mask, ID2COLOR) for mask in val_targets]
+
 np_train_features = np.array(train_features)
 np_train_targets = np.stack(train_targets_enc).astype('float32')
+
+np_val_features = np.array(val_features)
+np_val_targets = np.stack(val_targets_enc).astype('float32')
 
 # %%
 # Visualize an image and its mask
@@ -159,31 +164,31 @@ def display(image_list):
         plt.imshow(image)
     plt.show()
 
+display([np_val_features[213], np_val_targets[213]])
 display([np_train_features[213], np_train_targets[213]])
 
 # %% 3. Data preprocessing
 # Expand the dimension of targets
 np_train_targets = np.expand_dims(np_train_targets, -1)
+np_val_targets = np.expand_dims(np_val_targets, -1)
 
 # Normalize features
 np_train_features = np_train_features / 255.0
-
-# Train test split
-SEED = 12345
-X_train, X_test, y_train, y_test = train_test_split(np_train_features, np_train_targets, random_state=SEED)
+np_val_features = np_val_features / 255.0
 
 # Convert numpy array to tensor
-X_train = tf.data.Dataset.from_tensor_slices(X_train)
-X_test = tf.data.Dataset.from_tensor_slices(X_test)
-y_train = tf.data.Dataset.from_tensor_slices(y_train)
-y_test = tf.data.Dataset.from_tensor_slices(y_test)
+train_features_tensor = tf.data.Dataset.from_tensor_slices(np_train_features)
+train_targets_tensor = tf.data.Dataset.from_tensor_slices(np_train_targets)
+val_features_tensor = tf.data.Dataset.from_tensor_slices(np_val_features)
+val_targets_tensor = tf.data.Dataset.from_tensor_slices(np_val_targets)
 
 # Combine train label and features into zip dataset
-train = tf.data.Dataset.zip((X_train, y_train))
-test = tf.data.Dataset.zip((X_test, y_test))
+train = tf.data.Dataset.zip((train_features_tensor, train_targets_tensor))
+val = tf.data.Dataset.zip((val_features_tensor, val_targets_tensor))
 
 # %%
 # Data augmentation layer
+SEED = 12345
 TRAIN_SIZE = len(train)
 BATCH_SIZE = 64
 BUFFER_SIZE = 3000
@@ -211,14 +216,14 @@ train_batches = (
     .prefetch(buffer_size=tf.data.AUTOTUNE)
 )
 
-test_batches = test.batch(BATCH_SIZE)
+val_batches = val.batch(BATCH_SIZE)
 
 # Display image from train batches
 for images, masks in train_batches.take(2):
     sample_image, sample_mask = images[0], masks[0]
     display([sample_image, sample_mask])
 
-# %% 4. UNet Model development
+# %% 4. U-Net Model development
 INPUT_SHAPE = list(IMAGE_SIZE) + [3,]
 
 # Define pretrained model
@@ -248,7 +253,7 @@ up_stack = [
     pix2pix.upsample(64,3)
 ]
 
-# Build UNet
+# Build U-Net
 OUTPUT_CLASSES = len(labels)
 
 # Downsampling layer
@@ -263,9 +268,8 @@ for up,skip in zip(up_stack, skips):
     concat = Concatenate()
     x = concat([x,skip])
 
-# Transpose convolution layer
-last = keras.layers.Conv2DTranspose(filters=OUTPUT_CLASSES, kernel_size=3, strides=2, padding='same')
-
+# Transpose convolution layer as output
+last = Conv2DTranspose(filters=OUTPUT_CLASSES, kernel_size=3, strides=2, padding='same')
 outputs = last(x)
 model = keras.Model(inputs=inputs, outputs=outputs)
 
@@ -291,8 +295,6 @@ def show_predictions(dataset=None, num=1):
     else:
         display([sample_image, sample_mask, create_mask(model.predict(tf.expand_dims(sample_image, axis=0)))])
 
-show_predictions()
-
 # %%
 # Create a callback function with the show_predictions function
 class DisplayCallback(tf.keras.callbacks.Callback):
@@ -306,13 +308,13 @@ tb = tf.keras.callbacks.TensorBoard(log_dir=LOG_DIR)
 
 # %%
 # Model training
-EPOCHS = 10
-VAL_SUBSPLITS = 5
-VALIDATION_STEPS = len(test) // BATCH_SIZE // VAL_SUBSPLITS
+EPOCHS = 50
+VAL_SUBSPLITS = 2
+VALIDATION_STEPS = len(val) // BATCH_SIZE // VAL_SUBSPLITS
 
 model_history = model.fit(
     train_batches, 
-    validation_data=test_batches, 
+    validation_data=val_batches, 
     validation_steps=VALIDATION_STEPS, 
     epochs=EPOCHS, 
     steps_per_epoch=STEPS_PER_EPOCH,
@@ -320,6 +322,6 @@ model_history = model.fit(
 )
 
 # %% 5. Model evaluation
-show_predictions(test_batches, num=5)
+show_predictions(val_batches, num=5)
 
 # %%
