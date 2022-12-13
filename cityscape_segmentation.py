@@ -1,8 +1,10 @@
 # %%
 import tensorflow as tf
 from tensorflow import keras
-from keras.layers import RandomFlip, Input, Conv2DTranspose, Concatenate, Layer
+from keras.layers import RandomFlip, Input, Conv2DTranspose, Concatenate, Layer, Dense
+from keras.callbacks import TensorBoard, Callback, ReduceLROnPlateau, EarlyStopping
 from keras.utils import plot_model
+from sklearn.model_selection import train_test_split
 from IPython.display import clear_output
 from tensorflow_examples.models.pix2pix import pix2pix
 import matplotlib.pyplot as plt
@@ -110,13 +112,13 @@ IMAGE_SIZE = (128,128)
 ID2COLOR = { label.id : np.asarray(label.color) for label in labels }
 
 def find_closest_labels_vectorized(mask, mapping):     
-    closest_distance = np.full([mask.shape[0], mask.shape[1]], 10000) 
+    closest_dist = np.full([mask.shape[0], mask.shape[1]], 10000) 
     closest_category = np.full([mask.shape[0], mask.shape[1]], None)   
 
     for id, color in mapping.items():
         dist = np.sqrt(np.linalg.norm(mask - color.reshape([1,1,-1]), axis=-1))
-        is_closer = closest_distance > dist
-        closest_distance = np.where(is_closer, dist, closest_distance)
+        is_closer = closest_dist > dist
+        closest_dist = np.where(is_closer, dist, closest_dist)
         closest_category = np.where(is_closer, id, closest_category)
     
     return closest_category
@@ -138,7 +140,7 @@ np_val_targets = np.stack(val_targets_enc).astype('float32')
 # %%
 # Visualize an image and its mask
 def display(image_list):
-    plt.figure(figsize=(10,10))
+    plt.figure(figsize=(5,5))
     title = ['Original image', 'Encoded mask', 'Predicted mask']
 
     for i in range(len(image_list)):
@@ -164,8 +166,8 @@ def display(image_list):
         plt.imshow(image)
     plt.show()
 
-display([np_val_features[213], np_val_targets[213]])
 display([np_train_features[213], np_train_targets[213]])
+display([np_val_features[213], np_val_targets[213]])
 
 # %% 3. Data preprocessing
 # Expand the dimension of targets
@@ -176,19 +178,25 @@ np_val_targets = np.expand_dims(np_val_targets, -1)
 np_train_features = np_train_features / 255.0
 np_val_features = np_val_features / 255.0
 
+# Do train-test split
+SEED = 12345
+X_train, X_test, y_train, y_test = train_test_split(np_train_features, np_train_targets, random_state=SEED)
+
 # Convert numpy array to tensor
-train_features_tensor = tf.data.Dataset.from_tensor_slices(np_train_features)
-train_targets_tensor = tf.data.Dataset.from_tensor_slices(np_train_targets)
+X_train_tensor = tf.data.Dataset.from_tensor_slices(X_train)
+X_test_tensor = tf.data.Dataset.from_tensor_slices(X_test)
+y_train_tensor = tf.data.Dataset.from_tensor_slices(y_train)
+y_test_tensor = tf.data.Dataset.from_tensor_slices(y_test)
 val_features_tensor = tf.data.Dataset.from_tensor_slices(np_val_features)
 val_targets_tensor = tf.data.Dataset.from_tensor_slices(np_val_targets)
 
-# Combine train label and features into zip dataset
-train = tf.data.Dataset.zip((train_features_tensor, train_targets_tensor))
+# Combine label and features into zip dataset
+train = tf.data.Dataset.zip((X_train_tensor, y_train_tensor))
+test = tf.data.Dataset.zip((X_test_tensor, y_test_tensor))
 val = tf.data.Dataset.zip((val_features_tensor, val_targets_tensor))
 
 # %%
 # Data augmentation layer
-SEED = 12345
 TRAIN_SIZE = len(train)
 BATCH_SIZE = 64
 BUFFER_SIZE = 3000
@@ -216,6 +224,7 @@ train_batches = (
     .prefetch(buffer_size=tf.data.AUTOTUNE)
 )
 
+test_batches = test.batch(BATCH_SIZE)
 val_batches = val.batch(BATCH_SIZE)
 
 # Display image from train batches
@@ -254,7 +263,7 @@ up_stack = [
 ]
 
 # Build U-Net
-OUTPUT_CLASSES = len(labels)
+OUTPUT_CLASSES = len(labels)-1
 
 # Downsampling layer
 inputs = Input(shape=INPUT_SHAPE)
@@ -274,7 +283,7 @@ outputs = last(x)
 model = keras.Model(inputs=inputs, outputs=outputs)
 
 model.summary()
-plot_model(model, show_shapes=True, show_layer_names=True)
+plot_model(model, show_shapes=True, show_layer_names=True, to_file=os.path.join(os.getcwd(), 'resources', 'model.png'))
 
 # Model compiling
 loss = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
@@ -297,28 +306,30 @@ def show_predictions(dataset=None, num=1):
 
 # %%
 # Create a callback function with the show_predictions function
-class DisplayCallback(tf.keras.callbacks.Callback):
+class DisplayCallback(Callback):
     def on_epoch_end(self,epoch,logs=None):
         clear_output(wait=True)
         show_predictions()
         print('\nSample predictions after epoch {}\n'.format(epoch+1))
 
 LOG_DIR = os.path.join(os.getcwd(), "logs", datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
-tb = tf.keras.callbacks.TensorBoard(log_dir=LOG_DIR)
+tb = TensorBoard(log_dir=LOG_DIR)
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
+es = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 
 # %%
 # Model training
 EPOCHS = 50
-VAL_SUBSPLITS = 2
-VALIDATION_STEPS = len(val) // BATCH_SIZE // VAL_SUBSPLITS
+VAL_SUBSPLITS = 5
+VALIDATION_STEPS = len(test) // BATCH_SIZE // VAL_SUBSPLITS
 
 model_history = model.fit(
     train_batches, 
-    validation_data=val_batches, 
+    validation_data=test_batches, 
     validation_steps=VALIDATION_STEPS, 
     epochs=EPOCHS, 
     steps_per_epoch=STEPS_PER_EPOCH,
-    callbacks=[DisplayCallback(), tb]
+    callbacks=[DisplayCallback(), tb, reduce_lr, es]
 )
 
 # %% 5. Model evaluation
