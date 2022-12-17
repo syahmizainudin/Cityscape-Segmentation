@@ -1,7 +1,7 @@
 # %%
 import tensorflow as tf
 from tensorflow import keras
-from keras.layers import RandomFlip, Input, Conv2DTranspose, Concatenate, Layer, Dense
+from keras.layers import RandomFlip, Input, Conv2DTranspose, concatenate, Layer, Dropout, Conv2D, MaxPooling2D
 from keras.callbacks import TensorBoard, Callback, ReduceLROnPlateau, EarlyStopping
 from keras.utils import plot_model
 from sklearn.model_selection import train_test_split
@@ -109,7 +109,7 @@ val_path = glob.glob(os.path.join(DATASET_PATH, 'val', '*.jpg'))
 
 # %% 2. Data cleaning and visualization
 IMAGE_SIZE = (128,128)
-ID2COLOR = { label.id : np.asarray(label.color) for label in labels }
+ID2COLOR = {label.id: np.asarray(label.color) for label in labels}
 
 def find_closest_labels_vectorized(mask, mapping):     
     closest_dist = np.full([mask.shape[0], mask.shape[1]], 10000) 
@@ -140,7 +140,7 @@ np_val_targets = np.stack(val_targets_enc).astype('float32')
 # %%
 # Visualize an image and its mask
 def display(image_list):
-    plt.figure(figsize=(5,5))
+    plt.figure(figsize=(10,10))
     title = ['Original image', 'Encoded mask', 'Predicted mask']
 
     for i in range(len(image_list)):
@@ -233,61 +233,131 @@ for images, masks in train_batches.take(2):
     display([sample_image, sample_mask])
 
 # %% 4. U-Net Model development
+# INPUT_SHAPE = list(IMAGE_SIZE) + [3,]
+
+# # Define pretrained model
+# base_model = keras.applications.MobileNetV2(input_shape=INPUT_SHAPE, include_top=False)
+# plot_model(base_model, show_shapes=True, show_layer_names=True)
+
+# # Activation layer outputs from base model for concatenation
+# layer_names = [
+#     'block_1_expand_relu',
+#     'block_3_expand_relu',
+#     'block_6_expand_relu',
+#     'block_13_expand_relu', 
+#     'block_16_project'
+# ]
+
+# base_model_outputs = [base_model.get_layer(name).output for name in layer_names]
+
+# # Feature extractor
+# down_stack = keras.Model(inputs=base_model.input, outputs=base_model_outputs)
+# down_stack.trainable = False
+
+# # Upsampling path
+# up_stack = [
+#     pix2pix.upsample(512,3),
+#     pix2pix.upsample(256,3),
+#     pix2pix.upsample(128,3),
+#     pix2pix.upsample(64,3)
+# ]
+
+# # Build U-Net
+# OUTPUT_CLASSES = len(labels)
+
+# # Downsampling layer
+# inputs = Input(shape=INPUT_SHAPE)
+# skips = down_stack(inputs)
+# x = skips[-1]
+# skips = reversed(skips[:-1])
+
+# # Upsampling layers
+# for up,skip in zip(up_stack, skips):
+#     x = up(x)
+#     concat = Concatenate()
+#     x = concat([x,skip])
+
+# # Transpose convolution layer as output
+# last = Conv2DTranspose(filters=OUTPUT_CLASSES, kernel_size=3, strides=2, padding='same')
+# outputs = last(x)
+# model = keras.Model(inputs=inputs, outputs=outputs)
+
+# model.summary()
+# plot_model(model, show_shapes=True, show_layer_names=True, to_file=os.path.join(os.getcwd(), 'resources', 'model.png'))
+
+# # Model compiling
+# loss = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+# model.compile(optimizer='adam', loss=loss, metrics='acc')
+
+# %% Mode Development (Custom Model)
+# Encoder block
+def EncoderMiniBlock(inputs, n_filters=32, dropout_prob=0.3, max_pooling=True):
+    conv = Conv2D(n_filters, 
+                  3,  # filter size
+                  activation='relu',
+                  padding='same',
+                  kernel_initializer='HeNormal')(inputs)
+    conv = Conv2D(n_filters, 
+                  3,  # filter size
+                  activation='relu',
+                  padding='same',
+                  kernel_initializer='HeNormal')(conv)
+  
+    # conv = BatchNormalization()(conv, training=False)
+    if dropout_prob > 0:     
+        conv = Dropout(dropout_prob)(conv)
+    if max_pooling:
+        next_layer = MaxPooling2D(pool_size = (2,2))(conv)    
+    else:
+        next_layer = conv
+    skip_connection = conv    
+    return next_layer, skip_connection
+
+# Decoder block
+def DecoderMiniBlock(prev_layer_input, skip_layer_input, n_filters=32):
+    up = Conv2DTranspose(
+                 n_filters,
+                 (3,3),
+                 strides=(2,2),
+                 padding='same')(prev_layer_input)
+    merge = concatenate([up, skip_layer_input], axis=-1)
+    conv = Conv2D(n_filters, 
+                 3,  
+                 activation='relu',
+                 padding='same',
+                 kernel_initializer='HeNormal')(merge)
+    conv = Conv2D(n_filters,
+                 3, 
+                 activation='relu',
+                 padding='same',
+                 kernel_initializer='HeNormal')(conv)
+    return conv
+
+# Build the Unet
 INPUT_SHAPE = list(IMAGE_SIZE) + [3,]
-
-# Define pretrained model
-base_model = keras.applications.MobileNetV2(input_shape=INPUT_SHAPE, include_top=False)
-plot_model(base_model, show_shapes=True, show_layer_names=True)
-
-# Activation layer outputs from base model for concatenation
-layer_names = [
-    'block_1_expand_relu',
-    'block_3_expand_relu',
-    'block_6_expand_relu',
-    'block_13_expand_relu', 
-    'block_16_project'
-]
-
-base_model_outputs = [base_model.get_layer(name).output for name in layer_names]
-
-# Feature extractor
-down_stack = keras.Model(inputs=base_model.input, outputs=base_model_outputs)
-down_stack.trainable = False
-
-# Upsampling path
-up_stack = [
-    pix2pix.upsample(512,3),
-    pix2pix.upsample(256,3),
-    pix2pix.upsample(128,3),
-    pix2pix.upsample(64,3)
-]
-
-# Build U-Net
 OUTPUT_CLASSES = len(labels)-1
+n_filters = 16
 
-# Downsampling layer
-inputs = Input(shape=INPUT_SHAPE)
-skips = down_stack(inputs)
-x = skips[-1]
-skips = reversed(skips[:-1])
+inputs = Input(INPUT_SHAPE)
+x1,skip1 = EncoderMiniBlock(inputs, n_filters, 0)
+x2,skip2 = EncoderMiniBlock(x1, n_filters*2, 0)
+x3,skip3 = EncoderMiniBlock(x2, n_filters*4, 0)
+x4,skip4 = EncoderMiniBlock(x3, n_filters*8, 0, max_pooling=False)
 
-# Upsampling layers
-for up,skip in zip(up_stack, skips):
-    x = up(x)
-    concat = Concatenate()
-    x = concat([x,skip])
+x = DecoderMiniBlock(x4, skip3, n_filters*4)
+x = DecoderMiniBlock(x, skip2, n_filters*2)
+x = DecoderMiniBlock(x, skip1, n_filters)
 
-# Transpose convolution layer as output
-last = Conv2DTranspose(filters=OUTPUT_CLASSES, kernel_size=3, strides=2, padding='same')
-outputs = last(x)
+outputs = Conv2D(filters=OUTPUT_CLASSES, kernel_size=1, padding='same')(x)
 model = keras.Model(inputs=inputs, outputs=outputs)
 
-model.summary()
-plot_model(model, show_shapes=True, show_layer_names=True, to_file=os.path.join(os.getcwd(), 'resources', 'model.png'))
-
-# Model compiling
+# Compile the model
 loss = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 model.compile(optimizer='adam', loss=loss, metrics='acc')
+
+# Model summary
+model.summary()
+plot_model(model, show_layer_names=True, show_shapes=True, )
 
 # %%
 # Create function for displaying prediction
@@ -314,12 +384,12 @@ class DisplayCallback(Callback):
 
 LOG_DIR = os.path.join(os.getcwd(), "logs", datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
 tb = TensorBoard(log_dir=LOG_DIR)
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
-es = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+reduce_lr = ReduceLROnPlateau(monitor='val_acc', factor=0.2, patience=5, min_lr=0.001)
+es = EarlyStopping(monitor='val_acc', patience=5, restore_best_weights=True)
 
 # %%
 # Model training
-EPOCHS = 50
+EPOCHS = 20
 VAL_SUBSPLITS = 5
 VALIDATION_STEPS = len(test) // BATCH_SIZE // VAL_SUBSPLITS
 
