@@ -1,7 +1,7 @@
 # %%
 import tensorflow as tf
 from tensorflow import keras
-from keras.layers import RandomFlip, Input, Conv2DTranspose, concatenate, Layer, Dropout, Conv2D, MaxPooling2D
+from keras.layers import RandomFlip, Input, Conv2DTranspose, Concatenate, concatenate, Layer, Dropout, Conv2D, MaxPooling2D
 from keras.callbacks import TensorBoard, Callback, ReduceLROnPlateau, EarlyStopping
 from keras.utils import plot_model
 from sklearn.model_selection import train_test_split
@@ -237,7 +237,6 @@ for images, masks in train_batches.take(2):
 
 # # Define pretrained model
 # base_model = keras.applications.MobileNetV2(input_shape=INPUT_SHAPE, include_top=False)
-# plot_model(base_model, show_shapes=True, show_layer_names=True)
 
 # # Activation layer outputs from base model for concatenation
 # layer_names = [
@@ -263,7 +262,7 @@ for images, masks in train_batches.take(2):
 # ]
 
 # # Build U-Net
-# OUTPUT_CLASSES = len(labels)
+# OUTPUT_CLASSES = len(labels)-1
 
 # # Downsampling layer
 # inputs = Input(shape=INPUT_SHAPE)
@@ -359,7 +358,7 @@ model.compile(optimizer='adam', loss=loss, metrics='acc')
 
 # Model summary
 model.summary()
-plot_model(model, show_layer_names=True, show_shapes=True, )
+plot_model(model, show_layer_names=True, show_shapes=True)
 
 # %%
 # Create function for displaying prediction
