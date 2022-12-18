@@ -232,7 +232,7 @@ for images, masks in train_batches.take(2):
     sample_image, sample_mask = images[0], masks[0]
     display([sample_image, sample_mask])
 
-# %% 4. U-Net Model development
+# %% 4. Model development (Transfer Learning)
 # INPUT_SHAPE = list(IMAGE_SIZE) + [3,]
 
 # # Define pretrained model
