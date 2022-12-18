@@ -289,7 +289,7 @@ for images, masks in train_batches.take(2):
 # loss = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 # model.compile(optimizer='adam', loss=loss, metrics='acc')
 
-# %% Mode Development (Custom Model)
+# %% Mode development (Custom Model)
 # Encoder block
 def EncoderMiniBlock(inputs, n_filters=32, dropout_prob=0.3, max_pooling=True):
     conv = Conv2D(n_filters, 
@@ -338,15 +338,17 @@ INPUT_SHAPE = list(IMAGE_SIZE) + [3,]
 OUTPUT_CLASSES = len(labels)-1
 n_filters = 16
 
-inputs = Input(INPUT_SHAPE)
-x1,skip1 = EncoderMiniBlock(inputs, n_filters, 0)
-x2,skip2 = EncoderMiniBlock(x1, n_filters*2, 0)
-x3,skip3 = EncoderMiniBlock(x2, n_filters*4, 0)
-x4,skip4 = EncoderMiniBlock(x3, n_filters*8, 0, max_pooling=False)
+# Downsampling
+inputs = Input(INPUT_SHAPE) # 128x128
+x1,skip1 = EncoderMiniBlock(inputs, n_filters) # 64x64
+x2,skip2 = EncoderMiniBlock(x1, n_filters*2) # 32x32
+x3,skip3 = EncoderMiniBlock(x2, n_filters*4) # 16x16
+x4,skip4 = EncoderMiniBlock(x3, n_filters*8, max_pooling=False) # 16x16
 
-x = DecoderMiniBlock(x4, skip3, n_filters*4)
-x = DecoderMiniBlock(x, skip2, n_filters*2)
-x = DecoderMiniBlock(x, skip1, n_filters)
+# Upsampling
+x = DecoderMiniBlock(x4, skip3, n_filters*4) # 32x32
+x = DecoderMiniBlock(x, skip2, n_filters*2) # 64x64
+x = DecoderMiniBlock(x, skip1, n_filters) # 128x128
 
 outputs = Conv2D(filters=OUTPUT_CLASSES, kernel_size=1, padding='same')(x)
 model = keras.Model(inputs=inputs, outputs=outputs)
